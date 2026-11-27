@@ -1,298 +1,124 @@
-# MedSec — transferência segura de laudos
+# MedSec - Transferencia Segura de Laudos Medicos
 
-Projeto acadêmico em Python para demonstrar controles de segurança em uma comunicação cliente-servidor de transferência de laudos médicos.
+Projeto final da disciplina de Seguranca da Informacao (PSE102A - PUCPR). Implementa comunicacao cliente-servidor em Python 3.12 sobre rede IP real para envio, armazenamento e consulta de laudos medicos, cobrindo controles de autenticacao, autorizacao, criptografia em transito/repouso e deteccao/bloqueio de intrusao.
 
-> **Atenção à compatibilidade com a rubrica:** este repositório implementa o **MedSec**, não um Cofre de Senhas. Os papéis existentes são `medico` e `recepcionista`; o protocolo é TCP com TLS e JSON; não há aplicação cliente, API HTTP/HTTPS, JWT, banco de dados, UFW ou Fail2ban configurados. As diferenças são identificadas ao longo deste documento para não atribuir ao código funcionalidades que ele não possui.
+## Estrutura do Projeto
 
-## 1. Identificação do projeto e da equipe
+- `setup_pki.py`: gera a Autoridade Certificadora interna (`ca.crt` / `ca.key`), o certificado TLS do servidor com IPs no SAN (`servidor.crt` / `servidor.key`), o par RSA de assinatura do medico (`medico_sign.key` / `medico_sign.pub`), a chave AES-256 para cifragem em repouso (`dados/aes_repouso.key`) e a base inicial de usuarios (`dados/usuarios.json`).
+- `servidor.py`: servidor TCP/TLS multithread com autenticacao PBKDF2 + TOTP, RBAC, verificacao de assinatura RSA-PSS, cifragem AES-256-GCM em repouso, IDS/IPS com blacklist temporaria e auditoria em `logs/security_audit.log`.
+- `cliente.py`: cliente TLS interativo que valida o certificado do servidor contra `certs/ca.crt`, autentica usuario/senha/TOTP e assina laudos com `certs/medico_sign.key`.
+- `testes_ataque.py`: suite automatizada com os 4 casos de validacao (`T01` a `T04`).
+- `requirements.txt`: dependencias do projeto (`cryptography` e `pyotp`).
+- `.gitignore`: impede o versionamento de chaves privadas (`certs/*.key`), `dados/`, `logs/` e `.venv/`.
 
-- **Solução:** MedSec — transferência segura de laudos.
-- **Integrantes:** Nyckson Lael De Melo e Ian Valentim de Melo Facó.
-- **Disciplina:** PSE102A - Segurança da Informação.
-- **Vídeo de demonstração:** *link pendente; será incluído após publicação com acesso liberado ao professor.*
+## Controles Implementados (RA1, RA2 e RA3)
 
-## 2. Objetivo e cenário de uso
+### RA1 - Identificacao, Autenticacao e Controle de Acesso
+- **Hash de senha:** `PBKDF2-HMAC-SHA256` com `600.000` iteracoes, salt aleatorio de 16 bytes por usuario e comparacao em tempo constante via `hmac.compare_digest`.
+- **Segundo fator (2FA):** TOTP compativel com RFC 6238 (`pyotp`, tolerancia `valid_window=1` para leve diferenca de relogio).
+- **RBAC no servidor:**
+  - `medico` (`dr_silva`): autorizado para `ENVIAR_LAUDO`, `BAIXAR_LAUDO` e `LISTAR_STATUS`.
+  - `recepcionista` (`recep_ana`): autorizado apenas para `LISTAR_STATUS` (retorna `403 ACESSO_NEGADO` em envio e download).
 
-O projeto demonstra como proteger a transferência de laudos médicos entre um cliente autorizado e um servidor. O ativo protegido é o conteúdo clínico dos laudos, além de credenciais, chaves criptográficas e metadados associados.
+### RA2 - Criptografia em Transito, Integridade e Repouso
+- **Canal seguro (TLS):** socket TCP protegido com `ssl` (minimo TLS 1.2) e validacao estrita de cadeia X.509 e `SubjectAlternativeName` (IP real da VPN + `127.0.0.1`).
+- **Assinatura digital:** laudos assinados no cliente com `RSA-PSS` + `SHA-256` (`certs/medico_sign.key`) e validados pelo servidor (`certs/medico_sign.pub`) antes de serem aceitos.
+- **Cifragem em repouso:** conteudo salvo em `dados/laudos/<ID>.enc` cifrado com `AES-256-GCM`, nonce unico de 12 bytes por arquivo e `laudo_id` como AAD. Metadados ficam separados em `<ID>.meta.json`.
 
-Os perfis de acesso implementados são:
+### RA3 - Deteccao de Intrusao, Prevencao e Auditoria
+- **IDS/IPS integrado:** monitora falhas por IP em janela deslizante de 60 segundos (`LOGIN_FALHO`, `PAYLOAD_MALFORMADO`, `TLS_FALHA`, `NAO_AUTENTICADO`, `ACAO_INVALIDA`, `ACAO_DESCONHECIDA`, `LAUDO_INCOMPLETO`) e rajadas de conexoes (>20 conexoes em 60s).
+- **Blacklist automatica:** ao atingir 4 falhas em 60s (ou exceder o limite de conexoes), bloqueia o IP por 120 segundos, retornando `429 IP_BLOQUEADO` e recusando novas conexoes imediatamente.
+- **Auditoria:** eventos gravados em formato JSON Lines em `logs/security_audit.log` e exibidos no terminal do servidor.
 
-| Perfil | Permissões |
-|---|---|
-| `medico` | Enviar laudos, baixar laudos e listar status |
-| `recepcionista` | Listar status |
+## Pre-requisitos e Instalacao (Windows / Python 3.12)
 
-O código **não implementa** os perfis `admin` e `leitor`, cadastro de contas por interface nem exclusão de segredos.
-
-### Propriedades de segurança demonstradas
-
-- **Confidencialidade:** TLS protege a conexão; AES-256-GCM protege o conteúdo do laudo armazenado em repouso. Os metadados e logs não são cifrados pelo aplicativo e podem conter nome de paciente.
-- **Integridade:** a assinatura do conteúdo é validada com RSA-PSS/SHA-256 antes do armazenamento; AES-GCM detecta adulteração dos arquivos cifrados.
-- **Autenticidade:** o servidor autentica usuários com senha e TOTP e valida a assinatura digital do laudo com uma chave pública confiável para a instalação.
-- **Rastreabilidade:** eventos de autenticação, acesso, envio, download e falhas são registrados no terminal e em `logs/security_audit.log`. O log é local, não é protegido contra alteração e pode conter dados sensíveis; portanto, demonstra auditoria básica, não uma trilha inviolável.
-
-Este é um projeto didático, não um sistema clínico pronto. Não utilize dados reais de pacientes.
-
-## 3. Arquitetura, rede e tecnologias
-
-### Nós e comunicação
-
-O projeto consiste no processo servidor e em um cliente que precisa ser implementado separadamente. Eles se comunicam por uma conexão TCP protegida por TLS. O servidor recebe objetos JSON UTF-8 delimitados por `\n`.
-
-```text
-+-----------------------------+     TCP + TLS 1.2 ou superior     +-----------------------------+
-| Cliente (não incluído)      | --------------------------------> | Servidor MedSec             |
-| - valida certs/ca.crt        |          padrão: 8443/TCP         | - servidor.py               |
-| - autentica com senha + TOTP| <-------------------------------- | - RBAC e validação de laudo |
-| - assina conteúdo do laudo  |            respostas JSON          | - arquivos em dados/        |
-+-----------------------------+                                    +-----------------------------+
-                                                                       |
-                                              logs/security_audit.log <-+
-```
-
-`8443/TCP` é a porta padrão do servidor. O protocolo **não é HTTPS**: não existe HTTP, FastAPI ou Flask neste repositório. `0.0.0.0` é o endereço de escuta padrão, isto é, o processo aceita conexões em todas as interfaces locais. Use firewall para limitar os clientes autorizados.
-
-### Tecnologias e justificativa
-
-| Tecnologia | Uso neste repositório |
-|---|---|
-| Python 3.10+ | Linguagem do servidor e do script de provisionamento |
-| `socket`, `ssl`, `threading` (biblioteca padrão) | Servidor TCP, TLS e tratamento concorrente de conexões |
-| `cryptography` | Criação de certificados/chaves, RSA-PSS, AES-256-GCM e operações criptográficas |
-| `pyotp` | Geração e validação de códigos TOTP |
-| `hashlib` (biblioteca padrão) | Hash de senha com PBKDF2-HMAC-SHA256 |
-
-**Não são dependências nem componentes atuais:** FastAPI, Flask, PyJWT, OpenSSL como executável, banco de dados, `ufw` e Fail2ban. O script `setup_pki.py` gera certificados usando a biblioteca Python `cryptography`; não chama o comando OpenSSL. A defesa contra falhas e rajadas de conexões é um bloqueio temporário em memória dentro do processo, não uma regra de firewall nem uma integração com Fail2ban.
-
-## 4. Pré-requisitos de ambiente
-
-- Windows, Linux ou macOS com Python **3.10 ou superior**.
-- PowerShell no Windows ou terminal shell no Linux/macOS.
-- Dependências listadas em [`requirements.txt`](./requirements.txt).
-- Para conexões entre computadores, conectividade de rede e liberação restrita da porta TCP escolhida.
-- OpenSSL ou Wireshark são opcionais para inspeção manual de TLS; não são necessários para instalar ou executar o servidor.
-- `ufw` e Fail2ban não são configurados pelo projeto. Em um host Linux, as regras de firewall e os serviços de proteção precisam ser administrados separadamente.
-
-## 5. Estrutura do repositório
-
-```text
-.
-├── certs/
-│   ├── ca.crt                 # Certificado público da CA (presente no repositório)
-│   ├── medico_sign.pub        # Chave pública de verificação (presente no repositório)
-│   └── servidor.crt           # Certificado TLS público (presente no repositório)
-├── requirements.txt           # cryptography e pyotp
-├── servidor.py                # Servidor TCP/TLS, autenticação e operações de laudo
-├── setup_pki.py               # Provisiona certificados, chaves e contas iniciais
-└── .gitignore                 # Ignora ambiente virtual, dados, logs e arquivos *.key
-```
-
-O provisionamento cria arquivos locais ignorados pelo Git:
-
-```text
-certs/
-├── ca.key                     # Chave privada da autoridade certificadora
-├── servidor.key               # Chave privada TLS do servidor
-└── medico_sign.key            # Chave privada para assinar laudos
-dados/
-├── aes_repouso.key            # Chave AES-256 dos laudos
-├── usuarios.json              # Hashes de senha e segredos TOTP
-└── laudos/                    # Arquivos .enc e metadados .meta.json
-logs/
-└── security_audit.log         # Eventos em formato JSON Lines
-```
-
-Não existem neste repositório as pastas `server/`, `client/` ou `scripts/`, nem o arquivo `.env.example`. As configurações do servidor são passadas por argumentos de linha de comando (`--host` e `--port`), e os caminhos de certificados e dados são relativos à pasta atual.
-
-## 6. Instalação e configuração
-
-### Obter o código
-
-Se ainda não tiver uma cópia local, clone o repositório usando a URL fornecida pela equipe ou pelo professor:
-
-```bash
-git clone <URL_DO_REPOSITORIO>
-cd medsec-laudos-main
-```
-
-Se os arquivos já estiverem no computador, abra o terminal na raiz do projeto e ignore o passo de clone.
-
-### Windows (PowerShell)
+Em cada PC (Servidor e Cliente):
 
 ```powershell
-py --version
-py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-Não é necessário ativar o ambiente virtual. Executar `.\.venv\Scripts\python.exe` diretamente evita problemas com a política de execução do PowerShell.
-
-Opcionalmente, ative-o:
-
-```powershell
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+pip install -r requirements.txt
 ```
 
-### Linux/macOS
+## Configuracao e Execucao em Rede Real (2 PCs via VPN)
 
-```bash
-python3 --version
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-```
+### 1. Provisionamento inicial (apenas no PC Servidor)
 
-### Gerar certificados, chaves e contas
-
-Execute o setup somente em uma instalação nova:
+Informe o IP real do servidor na VPN (ex.: Radmin VPN `26.x.x.x`) para inclui-lo no SAN do certificado TLS:
 
 ```powershell
-.\.venv\Scripts\python.exe setup_pki.py
+python setup_pki.py --ip <IP_VPN_DO_SERVIDOR>
 ```
 
-No Linux/macOS:
+Ao final, anote os `TOTP secret` gerados para `dr_silva` (senha padrao `Medico@2026`) e `recep_ana` (senha padrao `Recep@2026`).
 
-```bash
-.venv/bin/python setup_pki.py
-```
+### 2. Liberacao de firewall (apenas no PC Servidor)
 
-O comando pergunta quais IPs devem constar no certificado TLS. Pressione Enter para incluir somente `127.0.0.1`, ou digite os IPs separados por vírgula. Também é possível informar IPs na linha de comando:
+Em PowerShell como Administrador, libere a porta `8443/TCP` restrita a sub-rede da VPN (exemplo Radmin `26.0.0.0/8`):
 
 ```powershell
-.\.venv\Scripts\python.exe setup_pki.py --ip 192.168.1.25 10.8.0.5
+New-NetFirewallRule -DisplayName "MedSec TLS Server 8443" -Direction Inbound -Protocol TCP -LocalPort 8443 -RemoteAddress 26.0.0.0/8 -Action Allow
 ```
 
-O script cria certificados e chaves localmente com `cryptography`; não é necessário gerar certificados via OpenSSL. Ele também cria duas contas e imprime as credenciais e segredos/URIs TOTP no terminal. Guarde essas informações em local seguro e configure um aplicativo autenticador.
+### 3. Arquivos necessarios no PC Cliente
 
-> **Não rode o setup novamente sem backup e planejamento.** A cada execução, ele substitui certificados e chaves, chave AES, usuários e segredos TOTP. A substituição da chave AES impede a leitura dos laudos anteriormente cifrados; a substituição de credenciais e certificados também invalida cópias anteriores.
+Copie para o PC do colega apenas:
+- `cliente.py`, `testes_ataque.py` e `requirements.txt`
+- `certs/ca.crt` (para validar o certificado do servidor)
+- `certs/medico_sign.key` (para assinar laudos enviados como medico)
 
-### `.env`, firewall e Fail2ban
+Nao copie `certs/ca.key`, `certs/servidor.key`, `dados/aes_repouso.key` nem `dados/usuarios.json` para o PC cliente.
 
-Não há arquivo `.env` nem carregamento de variáveis de ambiente no código atual. Host e porta são configurados por `--host` e `--port`.
-
-O projeto não habilita nem configura `ufw` ou Fail2ban. Em um servidor Linux, um administrador pode limitar a porta à rede/IP do cliente, por exemplo:
-
-```bash
-sudo ufw allow from <IP_DO_CLIENTE> to any port 8443 proto tcp
-sudo ufw status
-```
-
-Revise as regras existentes antes de habilitar ou alterar um firewall remoto para evitar perder acesso ao host. Esse exemplo é uma configuração externa ao projeto; ele não configura Fail2ban e não deve ser interpretado como uma integração implementada.
-
-## 7. Execução e fluxo de uso
-
-### Iniciar o servidor
-
-Na raiz do projeto, no Windows:
+### 4. Subir o Servidor
 
 ```powershell
-.\.venv\Scripts\python.exe servidor.py --host 127.0.0.1 --port 8443
+python servidor.py --host 0.0.0.0 --port 8443
 ```
 
-Para aceitar conexões pela rede/VPN, o host pode escutar em todas as interfaces:
+### 5. Rodar o Cliente Interativo
+
+Teste local:
 
 ```powershell
-.\.venv\Scripts\python.exe servidor.py --host 0.0.0.0 --port 8443
+python cliente.py
 ```
 
-No Linux/macOS, substitua o executável por `.venv/bin/python`. Para encerrar, pressione `Ctrl+C`.
-
-O servidor precisa dos arquivos gerados em `certs/` e `dados/`. Execute o comando da pasta raiz. O cliente deve confiar em `certs/ca.crt` e conectar usando um IP/nome incluído no certificado.
-
-### Cliente e fluxo de uso
-
-**Este repositório não contém um programa cliente.** Portanto, não há comando para executar um cliente nem uma tela de cadastro/login. Um cliente compatível precisa implementar TLS, validação do certificado, mensagens JSON terminadas em `\n`, assinatura RSA-PSS e as ações listadas abaixo.
-
-As contas existentes são provisionadas estaticamente por `setup_pki.py`:
-
-| Usuário | Papel | Permissões |
-|---|---|---|
-| `dr_silva` | `medico` | Enviar, baixar e listar status |
-| `recep_ana` | `recepcionista` | Listar status |
-
-As senhas estão definidas no código de setup e são exibidas durante a geração. São credenciais demonstrativas e não devem ser usadas em produção. O login requer senha e token TOTP. O servidor não gera JWT: a sessão autenticada permanece associada à conexão TLS atual.
-
-O protocolo aceita uma mensagem JSON por linha; limite de 1 MiB por mensagem:
-
-| `acao` | Campos adicionais | Resultado |
-|---|---|---|
-| `LOGIN` | `usuario`, `senha`, `totp` | Autentica o usuário na conexão |
-| `ENVIAR_LAUDO` | `paciente`, `conteudo`, `assinatura_b64` | Verifica assinatura e armazena o conteúdo cifrado |
-| `LISTAR_STATUS` | — | Retorna metadados, sem conteúdo clínico |
-| `BAIXAR_LAUDO` | `laudo_id` | Decifra e retorna o laudo autorizado |
-| `SAIR` | — | Encerra a conexão |
-
-Exemplo de requisição de login:
-
-```json
-{"acao":"LOGIN","usuario":"dr_silva","senha":"<senha>","totp":"<codigo-atual>"}
-```
-
-Para enviar, `assinatura_b64` deve conter a assinatura RSA-PSS/SHA-256 dos bytes UTF-8 exatos de `conteudo`, feita com `certs/medico_sign.key`. O servidor verifica usando `certs/medico_sign.pub`. Não existe ação para excluir um laudo.
-
-As respostas contêm `ok` e `codigo`. Entre os códigos usados estão `200`, `400`, `401`, `403`, `404`, `429` e `500`.
-
-## 8. Roteiro de reprodução e validação
-
-Faça as verificações somente em uma instalação local/isolada, com dados fictícios. Não há suíte de testes automatizados ou scripts de força bruta no repositório.
-
-### RA1 — RBAC e MFA
-
-1. Inicie o servidor localmente em `127.0.0.1:8443`.
-2. Conecte com um cliente compatível e autentique como `recep_ana` usando sua senha e código TOTP.
-3. Envie uma requisição `ENVIAR_LAUDO` de teste. O servidor deve responder `403` (`ACESSO_NEGADO`), porque o papel `recepcionista` só pode listar status. A ação “excluir segredo” da rubrica não existe neste projeto.
-4. Em uma nova conexão, tente `LOGIN` com senha correta e código TOTP inválido. O servidor deve responder `401` (`CREDENCIAIS_INVALIDAS`).
-5. Confira os eventos `RBAC_ACESSO_NEGADO` e `LOGIN_NEGADO` no terminal e em `logs/security_audit.log`.
-
-Não há cliente implementado para executar esses passos. Uma ferramenta de teste precisa validar o certificado da CA e respeitar o protocolo JSON sobre TLS.
-
-### RA2 — Criptografia em repouso e em trânsito
-
-**Em repouso:** após enviar um laudo fictício válido, confira `dados/laudos/`. O arquivo `.enc` contém nonce e ciphertext do AES-256-GCM; o `.meta.json` contém metadados em texto JSON e, portanto, não deve ser confundido com o conteúdo cifrado. O projeto não usa banco de dados.
-
-No PowerShell:
+Teste remoto pela VPN:
 
 ```powershell
-Get-ChildItem .\dados\laudos\
-Format-Hex .\dados\laudos\<ID_DO_LAUDO>.enc
-Get-Content .\dados\laudos\<ID_DO_LAUDO>.meta.json
+python cliente.py --host <IP_VPN_DO_SERVIDOR> --port 8443
 ```
 
-**Em trânsito:** capture apenas o tráfego do seu ambiente de teste com Wireshark, usando o filtro `tcp.port == 8443`, e observe o handshake TLS e os registros cifrados. A captura não deve revelar o JSON em texto claro. Em Linux, uma captura restrita à interface local pode ser gravada para análise:
+Para gerar o token TOTP de 6 digitos no terminal durante o login:
 
-```bash
-sudo tcpdump -i lo -nn -s0 -w medsec-teste.pcap 'tcp port 8443'
+```powershell
+python -c "import pyotp; print(pyotp.TOTP('<TOTP_SECRET>').now())"
 ```
 
-Abra `medsec-teste.pcap` no Wireshark e examine o tráfego TLS. Pare a captura ao finalizar e não publique arquivos de captura que possam conter dados ou metadados sensíveis.
+## Casos de Teste Automatizados (`testes_ataque.py`)
 
-### RA3 — Defesa e monitoramento
+O script executa quatro cenarios de validacao:
+- `T01`: Login como `recep_ana`, consulta de status (`200`) e bloqueio RBAC (`403 ACESSO_NEGADO`) ao tentar enviar ou baixar laudos.
+- `T02`: Envio legitimo de laudo assinado por `dr_silva` em canal TLS, cifragem AES-256-GCM em repouso e download com verificacao de integridade.
+- `T03`: Adulteracao do texto de um laudo apos a assinatura RSA-PSS, rejeitado pelo servidor com `400 ASSINATURA_INVALIDA`.
+- `T04`: Disparo de tentativas invalidas de login ate o bloqueio `429 IP_BLOQUEADO` e confirmacao de recusa imediata de nova conexao pela blacklist.
 
-O servidor possui um bloqueio temporário interno, em memória: quatro falhas contabilizadas em uma janela de 60 segundos podem bloquear o IP por 120 segundos; mais de 20 conexões na janela também podem resultar em bloqueio. O código não executa um script de força bruta, não cria regras no firewall e não integra com Fail2ban.
+Execucao local (le os segredos TOTP automaticamente de `dados/usuarios.json`):
 
-Para testar manualmente em loopback:
+```powershell
+python testes_ataque.py
+```
 
-1. Use somente `127.0.0.1` e uma conta fictícia de teste.
-2. Faça até quatro tentativas de login com código TOTP inválido, em conexões TLS de teste.
-3. Confira a resposta de bloqueio (`429`, `IP_BLOQUEADO`) e o evento `[IDS/IPS ALERT] IP_BLOQUEADO` no terminal e em `logs/security_audit.log`.
-4. Aguarde o período de bloqueio antes de repetir. O estado é mantido somente em memória e desaparece quando o servidor reinicia.
+Execucao remota a partir do PC Cliente:
 
-Não há script de teste automatizado, regra Fail2ban ou bloqueio persistente no firewall para reproduzir. Para evidenciar Fail2ban especificamente, seria necessário implementar e configurar essa integração separadamente.
+```powershell
+python testes_ataque.py --host <IP_VPN_DO_SERVIDOR> --port 8443 --totp-medico <TOTP_SECRET_MEDICO> --totp-recep <TOTP_SECRET_RECEP>
+```
 
-### Conformidade ética e legal
+Para executar apenas um caso especifico (por exemplo, `T02` durante captura no Wireshark com filtro `tcp.port == 8443`):
 
-Testes de autenticação, bloqueio e captura de pacotes devem ser realizados exclusivamente em ambiente isolado e autorizado pela equipe, com contas fictícias e conteúdo de teste. Não teste endereços, serviços ou redes de terceiros. Não use, grave ou compartilhe dados reais de saúde. A equipe deve revisar e observar a legislação e as políticas institucionais aplicáveis, incluindo a LGPD, antes de qualquer tratamento de dados pessoais.
+```powershell
+python testes_ataque.py --host <IP_VPN_DO_SERVIDOR> --port 8443 --totp-medico <TOTP_SECRET_MEDICO> --teste T02
+```
 
-## 9. Segurança, armazenamento e limitações
-
-- O TLS exige versão mínima 1.2.
-- Senhas são armazenadas como hashes PBKDF2-HMAC-SHA256 com salt, não em texto claro no arquivo de usuários.
-- O conteúdo do laudo só é armazenado depois da verificação da assinatura e é cifrado com AES-256-GCM; a chave de 32 bytes fica em `dados/aes_repouso.key`.
-- O nonce GCM é armazenado junto ao ciphertext, e o ID do laudo é usado como dado autenticado adicional.
-- Metadados podem expor nome de paciente. Proteja `dados/`, `logs/` e backups com permissões adequadas.
-- O bloqueio IDS/IPS é local ao processo e não persiste após reinicialização.
-- O `.gitignore` exclui chaves privadas (`certs/*.key`), dados, logs e `.venv/`. Verifique o estado do repositório antes de compartilhar arquivos.
-- Nunca compartilhe `certs/ca.key`, `certs/servidor.key`, `certs/medico_sign.key`, `dados/aes_repouso.key`, `dados/usuarios.json`, laudos ou logs.
-- Sem `dados/aes_repouso.key`, não será possível decifrar os laudos de backup.
-
-O projeto não implementa cliente, JWT, API HTTP, banco de dados, gestão de usuários, recuperação/troca de senha, rotação automatizada de chaves, Fail2ban, gestão de firewall, retenção de dados ou trilha de auditoria inviolável. A utilização em produção exigiria implementação e revisão de segurança, privacidade, conformidade, operação e infraestrutura.
+Nota: o teste `T04` bloqueia o IP de origem por 120 segundos no servidor. Para reexecutar testes logo apos o `T04`, aguarde 120s ou reinicie `servidor.py`.
