@@ -31,8 +31,9 @@ DIR_LAUDOS = Path("dados/laudos")
 DIR_LOGS = Path("logs")
 ARQUIVO_LOG = DIR_LOGS / "security_audit.log"
 
-# Timeout evita que conexoes lentas ou travadas (Slowloris) prendam threads do servidor.
-TIMEOUT_CONEXAO = 15.0
+# Handshake TLS curto bloqueia conexoes travadas (Slowloris); sessao ativa tolera pausa humana no menu.
+TIMEOUT_HANDSHAKE = 10.0
+TIMEOUT_CONEXAO = 120.0
 # Limite de 1 MB por mensagem JSON protege contra exaustao de memoria.
 MAX_TAMANHO_MSG = 1024 * 1024
 
@@ -361,7 +362,7 @@ def tratar_cliente(
     sessao: dict | None = None
 
     try:
-        conn_tcp.settimeout(TIMEOUT_CONEXAO)
+        conn_tcp.settimeout(TIMEOUT_HANDSHAKE)
         try:
             conn_tls = contexto_tls.wrap_socket(conn_tcp, server_side=True)
             conn_tls.settimeout(TIMEOUT_CONEXAO)
